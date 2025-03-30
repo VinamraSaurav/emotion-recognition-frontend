@@ -6,11 +6,13 @@ export default function Home() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [socket, setSocket] = useState(null);
-  const [emotion, setEmotion] = useState("");
+  const [faceEmotion, setFaceEmotion] = useState(null);
+  const [speechEmotions, setSpeechEmotions] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState("connecting");
-
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  
   useEffect(() => {
-    // Connect to Flask backend
     console.log("🔄 Connecting to backend...");
     const newSocket = io("http://localhost:5000");
 
@@ -25,22 +27,30 @@ export default function Home() {
     });
 
     newSocket.on("emotion_result", (data) => {
-      console.log("📡 Emotion received:", data);
-
-      if (data && data.emotion) {
-        setEmotion(data.emotion);
-      } else {
-        console.warn("⚠️ Unexpected data format from backend:", data);
+      console.log("📡 Facial Emotion received:", data);
+      if (data?.type === "speech"){
+        setSpeechEmotions(data.result);
+      }
+      if (data && data.faces && data.faces.length > 0) {
+        const faceData = data.faces[0];
+        setFaceEmotion({
+          emotion: faceData.emotion,
+          confidence: faceData.confidence
+        });
       }
     });
 
-    newSocket.on("error", (error) => {
-      console.error("❌ Backend error:", error);
-      setConnectionStatus("error");
+    newSocket.on("speech_emotion_result", (data) => {
+      console.log("🎤 Speech Emotion received:", data);
+      if (Array.isArray(data)) {
+        setSpeechEmotions(data);
+      } else if (data && data.emotion) {
+        // For backwards compatibility
+        setSpeechEmotions([{label: data.emotion, score: 0.8}]);
+      }
     });
 
     setSocket(newSocket);
-
     return () => {
       console.log("🔄 Closing socket connection...");
       newSocket.close();
@@ -48,198 +58,254 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    // Start video stream
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       console.log("📷 Requesting camera access...");
-      navigator.mediaDevices
-        .getUserMedia({ video: true })
-        .then((stream) => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            console.log("✅ Camera stream started!");
-          }
-        })
-        .catch((error) => console.error("❌ Error accessing camera:", error));
+      navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          console.log("✅ Camera stream started!");
+        }
+      }).catch((error) => console.error("❌ Error accessing camera:", error));
     }
   }, []);
 
   const captureFrame = () => {
-    if (!videoRef.current || !canvasRef.current || !socket) {
-      console.warn("⚠️ Skipping frame capture - Required elements not ready!");
-      return;
-    }
-
+    if (!videoRef.current || !canvasRef.current || !socket) return;
+    console.log("📸 Capturing frame...");
     const canvas = canvasRef.current;
     const context = canvas.getContext("2d");
-
-    // Draw video frame onto canvas
     context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-
-    // Convert canvas to base64 image
     const imageData = canvas.toDataURL("image/jpeg");
-
-    // Send image to backend
-    console.log("📤 Sending frame to backend...");
+    console.log("📡 Sending frame to backend...");
     socket.emit("send_frame", { frame: imageData });
   };
 
   useEffect(() => {
-    // Send frames at intervals
     const interval = setInterval(() => {
-      console.log("⏳ Capturing frame...");
       captureFrame();
-    }, 1000); // Send 1 frame per second
-
-    return () => {
-      console.log("🛑 Stopping frame capture...");
-      clearInterval(interval);
-    };
+    }, 1000);
+    return () => clearInterval(interval);
   }, [socket]);
 
-  // Helper function to get emotion color
-  const getEmotionColor = () => {
-    switch(emotion.toLowerCase()) {
-      case "happy": return "#FFD700";
-      case "sad": return "#4169E1";
-      case "angry": return "#FF4500";
-      case "surprise": return "#9932CC";
-      case "fear": return "#800080";
-      case "disgust": return "#006400";
-      case "neutral": return "#20B2AA";
-      default: return "#00BFFF";
+  const startRecording = async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.error("🎤 Audio recording not supported.");
+      return;
     }
+    console.log("🎤 Starting audio recording...");
+    setIsRecording(true);
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorderRef.current = new MediaRecorder(stream);
+    const audioChunks = [];
+
+    mediaRecorderRef.current.ondataavailable = (event) => {
+      console.log("🎤 Audio chunk received...");
+      audioChunks.push(event.data);
+    };
+
+    mediaRecorderRef.current.onstop = () => {
+      console.log("🎤 Stopping audio recording...");
+      setIsRecording(false);
+      const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+      const reader = new FileReader();
+      reader.readAsDataURL(audioBlob);
+      reader.onloadend = () => {
+        const base64Audio = reader.result.split(",")[1];
+        console.log("📡 Sending audio to backend...");
+        socket.emit("send_audio", { audio: base64Audio });
+      };
+    };
+
+    mediaRecorderRef.current.start();
+    setTimeout(() => {
+      console.log("🎤 Auto-stopping audio recording after 5s...");
+      mediaRecorderRef.current.stop();
+    }, 5000);
   };
 
-  // Helper function to get emotion emoji
-  const getEmotionEmoji = () => {
-    switch(emotion.toLowerCase()) {
-      case "happy": return "😊";
-      case "sad": return "😢";
-      case "angry": return "😠";
-      case "surprise": return "😲";
-      case "fear": return "😨";
-      case "disgust": return "🤢";
-      case "neutral": return "😐";
-      default: return "⏳";
-    }
+  // Helper function to get emoji for emotion
+  const getEmoji = (emotion) => {
+    const emotionMap = {
+      "happy": "😊",
+      "sad": "😢",
+      "angry": "😠",
+      "surprised": "😲",
+      "fearful": "😨",
+      "disgust": "🤢",
+      "neutral": "😐",
+      "calm": "😌",
+      "Happy": "😊",
+      "Sad": "😢",
+      "Angry": "😠",
+      "Surprised": "😲",
+      "Fear": "😨",
+      "Disgust": "🤢",
+      "Neutral": "😐",
+      "Calm": "😌"
+    };
+    
+    return emotionMap[emotion] || "❓";
   };
 
-  // Helper function to get connection status color
-  const getStatusColor = () => {
-    switch(connectionStatus) {
-      case "connected": return "#00FF00";
-      case "disconnected": return "#FF0000";
-      case "error": return "#FF0000";
-      default: return "#FFFF00";
-    }
+  // Circular progress component
+  const CircularProgress = ({ value, emotion, size = 120 }) => {
+    const radius = size * 0.4;
+    const circumference = 2 * Math.PI * radius;
+    const strokeDashoffset = circumference * (1 - value);
+    
+    return (
+      <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
+        <svg width={size} height={size} className="rotate-[-90deg]">
+          <circle
+            cx={size/2}
+            cy={size/2}
+            r={radius}
+            stroke="#334155"
+            strokeWidth="8"
+            fill="transparent"
+          />
+          <circle
+            cx={size/2}
+            cy={size/2}
+            r={radius}
+            stroke="#3b82f6"
+            strokeWidth="8"
+            fill="transparent"
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+            strokeLinecap="round"
+          />
+        </svg>
+        <div className="absolute flex items-center justify-center flex-col">
+          <span className="text-4xl">{getEmoji(emotion)}</span>
+        </div>
+      </div>
+    );
+  };
+
+  // Linear progress component
+  const LinearProgress = ({ label, value, color }) => {
+    return (
+      <div className="mb-3">
+        <div className="flex justify-between mb-1">
+          <span className="text-sm font-medium">{label} {getEmoji(label)}</span>
+          <span className="text-sm font-medium">{Math.round(value * 100)}%</span>
+        </div>
+        <div className="w-full bg-gray-700 rounded-full h-2.5">
+          <div 
+            className="h-2.5 rounded-full" 
+            style={{ width: `${value * 100}%`, backgroundColor: color }}
+          ></div>
+        </div>
+      </div>
+    );
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 to-blue-900 text-white p-8">
-      {/* Main container with glassmorphism effect */}
       <div className="max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 text-center">
-            EMOTION•SCAN
-          </h1>
-          <p className="text-center text-blue-300 mt-2">Facial Emotion Detection System</p>
-        </div>
-
-        {/* Main content */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Video feed with neomorphic container */}
+        <h1 className="text-5xl font-bold text-center text-transparent bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text">
+          EMOTION•SCAN
+        </h1>
+        <p className="text-center text-blue-300 mt-2">Facial & Speech Emotion Detection</p>
+        
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-8">
           <div className="lg:col-span-2">
-            <div className="bg-gray-800 bg-opacity-30 backdrop-filter backdrop-blur-lg rounded-2xl border border-gray-700 border-opacity-30 shadow-2xl p-4 h-full">
-              <div className="relative">
-                {/* Connection indicator */}
-                <div className="absolute top-4 right-4 z-10 flex items-center">
-                  <div className="w-3 h-3 rounded-full mr-2" style={{ backgroundColor: getStatusColor() }}></div>
-                  <span className="text-xs uppercase tracking-wider">
-                    {connectionStatus}
-                  </span>
-                </div>
-
-                {/* Video element with enhanced styling */}
-                <div className="relative rounded-xl overflow-hidden shadow-inner">
-                  <video 
-                    ref={videoRef} 
-                    autoPlay 
-                    playsInline 
-                    className="w-full rounded-xl"
-                    style={{ 
-                      filter: "contrast(1.05) brightness(1.05)",
-                      boxShadow: "inset 0 0 20px rgba(0,0,0,0.5)"
-                    }}
-                  />
-                  <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 backdrop-filter backdrop-blur-md rounded-lg px-3 py-1">
-                    <div className="flex items-center">
-                      <div className="w-2 h-2 rounded-full bg-red-500 mr-2 animate-pulse"></div>
-                      <span className="text-xs">LIVE</span>
-                    </div>
-                  </div>
-
-                  {/* Video overlay grid lines for futuristic effect */}
-                  <div className="absolute inset-0 pointer-events-none" 
-                    style={{
-                      backgroundImage: "linear-gradient(to right, rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.05) 1px, transparent 1px)",
-                      backgroundSize: "20px 20px"
-                    }}>
-                  </div>
-                </div>
-                
-                <canvas ref={canvasRef} width="640" height="480" hidden />
+            <div className="relative bg-gray-800 p-4 rounded-2xl">
+              <video ref={videoRef} autoPlay playsInline className="w-full rounded-xl" />
+              <canvas ref={canvasRef} width="640" height="480" hidden />
+              
+              {/* Status indicator */}
+              <div className={`absolute top-6 right-6 flex items-center px-3 py-1 rounded-full text-xs ${
+                connectionStatus === "connected" ? "bg-green-500/20 text-green-300" : 
+                connectionStatus === "connecting" ? "bg-yellow-500/20 text-yellow-300" : 
+                "bg-red-500/20 text-red-300"
+              }`}>
+                <div className={`w-2 h-2 rounded-full mr-2 ${
+                  connectionStatus === "connected" ? "bg-green-400" : 
+                  connectionStatus === "connecting" ? "bg-yellow-400" : 
+                  "bg-red-400"
+                }`}></div>
+                {connectionStatus}
               </div>
             </div>
           </div>
-
-          {/* Emotion display panel */}
-          <div className="h-full">
-            <div className="bg-gray-800 bg-opacity-30 backdrop-filter backdrop-blur-lg rounded-2xl border border-gray-700 border-opacity-30 shadow-2xl p-6 h-full relative overflow-hidden">
-              <h2 className="text-xl font-medium text-gray-300 mb-6">Emotional Analysis</h2>
+          
+          <div className="bg-gray-800 rounded-2xl overflow-hidden">
+            <div className="p-6">
+              <h2 className="text-xl font-bold text-gray-300 mb-6">Emotional Analysis</h2>
               
-              {/* Emotion indicator */}
-              <div className="flex flex-col items-center justify-center h-64 my-auto">
-                <div className="relative mb-10">
-                  <div className="absolute inset-0 rounded-full blur-xl opacity-50"
-                    style={{ backgroundColor: getEmotionColor() }}>
-                  </div>
-                  <div className="relative w-32 h-32 rounded-full flex items-center justify-center border-4 border-opacity-30"
-                    style={{ 
-                      backgroundColor: `${getEmotionColor()}20`,
-                      borderColor: getEmotionColor(),
-                      boxShadow: `0 0 30px ${getEmotionColor()}80`
-                    }}>
-                    <span className="text-5xl" role="img" aria-label="emotion">
-                      {getEmotionEmoji()}
-                    </span>
-                  </div>
-                </div>
-                <div className="text-center">
-                  <h3 className="text-3xl font-bold uppercase tracking-wider" 
-                    style={{ color: getEmotionColor() }}>
-                    {emotion || "Analyzing..."}
-                  </h3>
-                  {/* <p className="text-blue-300 text-sm mt-2">Detection confidence: High</p> */}
+              {/* Facial Emotion Section */}
+              <div className="mb-8">
+                <h3 className="text-lg font-medium text-blue-400 mb-4">Facial Expression</h3>
+                
+                <div className="flex flex-col items-center">
+                  {faceEmotion ? (
+                    <>
+                      <CircularProgress 
+                        value={faceEmotion.confidence} 
+                        emotion={faceEmotion.emotion} 
+                      />
+                      <div className="mt-3 text-center">
+                        <p className="text-xl font-bold">{faceEmotion.emotion}</p>
+                        <p className="text-sm text-gray-400">Confidence: {Math.round(faceEmotion.confidence * 100)}%</p>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-4">
+                      <p className="text-gray-400">Analyzing facial expression...</p>
+                    </div>
+                  )}
                 </div>
               </div>
-
-              {/* Tech pattern background */}
-              <div className="absolute inset-0 pointer-events-none opacity-5">
-                <div className="absolute inset-0" 
-                  style={{
-                    backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.1) 1px, transparent 1px)",
-                    backgroundSize: "20px 20px"
-                  }}>
-                </div>
+              
+              {/* Speech Emotion Section */}
+              <div>
+                <h3 className="text-lg font-medium text-red-400 mb-4">Speech Emotion</h3>
+                
+                {speechEmotions && speechEmotions.length > 0 ? (
+                  <div>
+                    {speechEmotions.map((item, index) => (
+                      <LinearProgress 
+                        key={index} 
+                        label={item.label || item.emotion} 
+                        value={item.score || item.confidence} 
+                        color={index === 0 ? "#ef4444" : index === 1 ? "#f97316" : index === 2 ? "#f59e0b" : "#10b981"}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-4">
+                    <p className="text-gray-400">Record your voice to analyze speech emotion</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
         </div>
-
-        {/* Footer */}
-        <div className="mt-8 text-center">
-          <p className="text-sm text-blue-300 opacity-70">©️ Developed with ❤️ || 2024</p>
+        
+        <div className="text-center mt-8">
+          <button
+            className={`px-6 py-3 rounded-full text-white font-bold transition-all ${
+              isRecording 
+                ? "bg-red-500 animate-pulse" 
+                : "bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
+            }`}
+            onClick={startRecording}
+            disabled={isRecording}
+          >
+            {isRecording ? (
+              <span className="flex items-center">
+                <span className="inline-block w-3 h-3 bg-white rounded-full mr-2 animate-pulse"></span>
+                Recording...
+              </span>
+            ) : (
+              <span className="flex items-center">
+                <span className="mr-2">🎤</span>
+                Record Audio
+              </span>
+            )}
+          </button>
         </div>
       </div>
     </div>
